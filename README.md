@@ -1,5 +1,7 @@
 # EV Charger — Solar + Grid Load Balancing (Home Assistant)
 
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/alexandre1116)
+
 Home Assistant automation that charges an electric vehicle, prioritizing
 solar surplus, with a fallback to off-peak grid charging (bi-hourly
 tariff), overload protection for the installation, and hysteresis with a
@@ -30,19 +32,21 @@ mode without turning the charger off.
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> off
-    off --> solar: surplus >= 2000W AND cooldown expired
-    solar --> solar: surplus >= 1600W
-    solar --> off: surplus < 1600W (starts 2 min cooldown)
-    off --> grid: off-peak AND charge_today AND house load < limit_low
-    grid --> grid: conditions still met
-    grid --> off: peak tariff OR NOT charge_today
-    solar --> off: peak tariff OR NOT charge_today
+    off --> solar: surplus ≥ 2000W
+    solar --> solar: surplus ≥ 1600W
+    solar --> off: surplus < 1600W
+    off --> grid: cheap & authorized
+    grid --> grid: conditions met
+    grid --> off: peak or blocked
+    solar --> off: peak or blocked
 ```
 
-Overload (block 1) is transversal: it can reduce or cut current in any of
-the three modes, whenever total house consumption or grid import reaches
-the critical limit.
+Overload (block 1) isn't shown above because it's transversal: it can
+reduce or cut current in any of the three states, whenever total house
+consumption or grid import reaches the critical limit. See the exact
+thresholds for each transition below.
 
 ### 1. Overload (installation protection)
 
@@ -164,5 +168,4 @@ with your own before importing.
 
 ## License
 
-Pick whichever license you prefer for your repository (e.g. MIT) — this
-project doesn't include one by default.
+[MIT](./LICENSE)
