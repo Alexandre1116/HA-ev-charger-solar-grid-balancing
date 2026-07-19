@@ -1,0 +1,20 @@
+# Helpers required by ev_charger_automation.yaml
+#
+# Note: these helpers cannot be created from automation YAML — either
+# paste this into configuration.yaml (and restart HA), or create the
+# equivalents via Settings → Devices & Services → Helpers → + Add Helper.
+
+input_select:
+  ev_charge_mode:
+    name: EV Charge Mode
+    options:
+      - "off"
+      - "solar"
+      - "grid"
+    initial: "off"
+    icon: mdi:ev-station
+
+timer:
+  ev_solar_cooldown:
+    name: EV Solar Mode Retry Cooldown
+    duration: "00:02:00"

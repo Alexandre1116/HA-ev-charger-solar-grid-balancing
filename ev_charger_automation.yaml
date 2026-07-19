@@ -1,0 +1,247 @@
+alias: EV Charger - Solar + Grid Load Balancing
+description: >-
+  Smart EV charging with a home battery system. Uses input_select.ev_charge_mode
+  (off/solar/grid) to track state between cycles, implementing real hysteresis
+  for solar mode (enters at 2000W, stays until it drops below 1600W). When
+  exiting solar mode due to insufficient surplus, starts timer.ev_solar_cooldown
+  and only attempts to re-enter solar mode after the timer expires. limit_low
+  is derived from safety_margin (6900 - 600 = 6300W).
+triggers:
+  - trigger: time_pattern
+    seconds: /8
+actions:
+  # ── 1. OVERLOAD — highest priority, regardless of mode ──────────────────
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ overload }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_amps > min_amps }}"
+                sequence:
+                  - target:
+                      entity_id: number.ev_charger_set_charge_current
+                    data:
+                      value: "{{ [current_amps - step_down_amps, min_amps] | max }}"
+                    action: number.set_value
+                  - data:
+                      name: EV Charger
+                      message: 🔻 Overload detected — current reduced.
+                    action: logbook.log
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_amps <= min_amps }}"
+                sequence:
+                  - target:
+                      entity_id: switch.ev_charger_rfid
+                    action: switch.turn_off
+                  - target:
+                      entity_id: input_select.ev_charge_mode
+                    data:
+                      option: "off"
+                    action: input_select.select_option
+                  - data:
+                      name: EV Charger
+                      message: ⛔ Critical overload — charger turned off.
+                    action: logbook.log
+          - stop: Overload handled
+    default: []
+
+  # ── 2. SOLAR MODE — hysteresis + re-entry cooldown ───────────────────────
+  # Enters at 2000W (if the cooldown isn't active); stays until it drops
+  # below 1600W. When exiting due to insufficient surplus, starts the cooldown.
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ (current_mode == 'solar' and solar_excess_w >= solar_off_threshold_w)
+                 or (current_mode != 'solar' and solar_excess_w >= solar_on_threshold_w
+                     and not solar_cooldown_active) }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ current_mode != 'solar' }}"
+            then:
+              - target:
+                  entity_id: input_select.ev_charge_mode
+                data:
+                  option: "solar"
+                action: input_select.select_option
+              - data:
+                  name: EV Charger
+                  message: ☀️ Solar mode activated — surplus available.
+                action: logbook.log
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: switch.ev_charger_rfid
+                    state: "off"
+                sequence:
+                  - target:
+                      entity_id: switch.ev_charger_rfid
+                    action: switch.turn_on
+            default: []
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ solar_target_amps > current_amps }}"
+                sequence:
+                  - target:
+                      entity_id: number.ev_charger_set_charge_current
+                    data:
+                      value: >-
+                        {{ [current_amps + step_up_amps, solar_target_amps] | min }}
+                    action: number.set_value
+              - conditions:
+                  - condition: template
+                    value_template: "{{ solar_target_amps < current_amps }}"
+                sequence:
+                  - target:
+                      entity_id: number.ev_charger_set_charge_current
+                    data:
+                      value: >-
+                        {{ [current_amps - step_down_amps, solar_target_amps] | max }}
+                    action: number.set_value
+            default: []
+          - stop: Solar mode handled
+    default:
+      - if:
+          - condition: template
+            value_template: "{{ current_mode == 'solar' }}"
+        then:
+          - target:
+              entity_id: input_select.ev_charge_mode
+            data:
+              option: "off"
+            action: input_select.select_option
+          - target:
+              entity_id: timer.ev_solar_cooldown
+            action: timer.start
+          - data:
+              name: EV Charger
+              message: ⚠️ Insufficient solar surplus — cooldown started before next attempt.
+            action: logbook.log
+
+  # ── 3. BLOCKED — peak tariff or charging not authorized today ───────────
+  - choose:
+      - conditions:
+          - condition: or
+            conditions:
+              - condition: template
+                value_template: "{{ energy_expensive }}"
+              - condition: template
+                value_template: "{{ not charge_today }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: switch.ev_charger_rfid
+                    state: "on"
+                sequence:
+                  - target:
+                      entity_id: number.ev_charger_set_charge_current
+                    data:
+                      value: "{{ min_amps }}"
+                    action: number.set_value
+                  - target:
+                      entity_id: switch.ev_charger_rfid
+                    action: switch.turn_off
+                  - data:
+                      name: EV Charger
+                      message: 🔌 Grid charging blocked.
+                    action: logbook.log
+            default: []
+          - target:
+              entity_id: input_select.ev_charge_mode
+            data:
+              option: "off"
+            action: input_select.select_option
+          - stop: Blocked mode handled
+    default: []
+
+  # ── 4. CHEAP GRID MODE ────────────────────────────────────────────────
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ not energy_expensive }}"
+          - condition: template
+            value_template: "{{ charge_today }}"
+          - condition: template
+            value_template: "{{ house_total_w < limit_low and grid_import_w < limit_low }}"
+        sequence:
+          - target:
+              entity_id: input_select.ev_charge_mode
+            data:
+              option: "grid"
+            action: input_select.select_option
+          - choose:
+              - conditions:
+                  - condition: state
+                    entity_id: switch.ev_charger_rfid
+                    state: "off"
+                sequence:
+                  - target:
+                      entity_id: switch.ev_charger_rfid
+                    action: switch.turn_on
+                  - data:
+                      name: EV Charger
+                      message: 🔌 Grid mode activated — cheap energy.
+                    action: logbook.log
+            default: []
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ current_amps < max_amps }}"
+                sequence:
+                  - target:
+                      entity_id: number.ev_charger_set_charge_current
+                    data:
+                      value: >-
+                        {{ [current_amps + step_up_amps, max_amps] | min }}
+                    action: number.set_value
+                  - data:
+                      name: EV Charger
+                      message: "🔼 Grid mode: current increased."
+                    action: logbook.log
+            default: []
+    default: []
+mode: single
+variables:
+  voltage: 230
+  max_amps: 20
+  min_amps: 8
+  step_up_amps: 1
+  step_down_amps: 3
+  max_total_power: 6900
+  max_grid_power: 6900
+  max_power: 6900
+  safety_margin: 600
+  limit_low: "{{ max_power - safety_margin }}"
+  solar_on_threshold_w: 2000
+  solar_off_threshold_w: 1600
+  solar_power: "{{ states('sensor.solar_power') | float(0) }}"
+  house_total_w: "{{ states('sensor.geral_casa_garagem_power') | float(0) }}"
+  evse_power: "{{ states('sensor.shellyem_48e729689cd1_channel_1_power') | float(0) }}"
+  grid_power: "{{ states('sensor.rede_power') | float(0) }}"
+  battery_power: "{{ states('sensor.bateria_power') | float(0) }}"
+  house_base_w: |
+    {% set v = house_total_w - evse_power %} {{ v if v > 0 else 0 }}
+  battery_charging_w: |
+    {{ battery_power if battery_power > 0 else 0 }}
+  solar_excess_w: "{{ solar_power - house_base_w - battery_charging_w }}"
+  grid_import_w: |
+    {{ grid_power if grid_power > 0 else 0 }}
+  current_amps: "{{ states('number.ev_charger_set_charge_current') | float(0) }}"
+  energy_expensive: "{{ is_state('input_boolean.custo_energia', 'on') }}"
+  charge_today: "{{ is_state('input_boolean.ev_charge_today', 'on') }}"
+  current_mode: "{{ states('input_select.ev_charge_mode') }}"
+  solar_cooldown_active: "{{ is_state('timer.ev_solar_cooldown', 'active') }}"
+  overload: |
+    {{ house_total_w >= max_total_power or grid_import_w >= max_grid_power }}
+  ideal_solar_amps_raw: "{{ (solar_excess_w / voltage) | float(0) }}"
+  solar_target_amps: >
+    {% set raw = ideal_solar_amps_raw %} {% if raw < min_amps %} {{ min_amps }}
+    {% elif raw > max_amps %} {{ max_amps }} {% else %} {{ raw | round(0) }} {%
+    endif %}
